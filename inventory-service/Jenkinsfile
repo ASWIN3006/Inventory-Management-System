@@ -1,0 +1,99 @@
+pipeline {
+    agent any
+
+    tools {
+        maven 'Apache Maven 3.9.3'
+        jdk 'OpenJDK-21'
+    }
+
+    environment {
+        APP_NAME     = 'inventory'
+        CONTEXT_PATH = '/inventory'
+        WAR_FILE     = 'target/inventory.war'
+
+        TOMCAT_URL   = 'http://localhost:8081'
+
+        TOMCAT_CREDS = credentials('tomcat-cred')
+        SONAR_ENV    = 'SonarQube'
+        SONAR_KEY    = 'ims-inventory'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                bat 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                bat 'mvn test'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONAR_ENV}") {
+                    bat "mvn sonar:sonar -Dsonar.projectKey=%SONAR_KEY%"
+                }
+            }
+        }
+
+        stage('Check Tomcat') {
+            steps {
+                bat '''
+                curl -I http://localhost:8081/manager/html
+                if %ERRORLEVEL% NEQ 0 (
+                    echo "❌ Tomcat Manager NOT reachable"
+                    exit /b 1
+                )
+                '''
+            }
+        }
+
+        stage('Deploy to Tomcat') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'tomcat-cred',
+                    usernameVariable: 'TOMCAT_USER',
+                    passwordVariable: 'TOMCAT_PASS')]) {
+
+                    bat '''
+                    curl --fail --show-error --upload-file "%WAR_FILE%" ^
+                    -u %TOMCAT_USER%:%TOMCAT_PASS% ^
+                    "%TOMCAT_URL%/manager/text/deploy?path=%CONTEXT_PATH%&update=true"
+                    '''
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                bat '''
+                curl -f http://localhost:8081/inventory/health
+                if %ERRORLEVEL% NEQ 0 (
+                    echo "❌ HEALTH CHECK FAILED"
+                    exit /b 1
+                )
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Inventory deployed successfully"
+            echo "URL: http://localhost:8081/inventory/health"
+        }
+
+        failure {
+            echo "❌ Pipeline FAILED - check Tomcat or logs"
+        }
+    }
+}
